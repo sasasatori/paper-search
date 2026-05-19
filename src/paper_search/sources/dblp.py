@@ -62,7 +62,7 @@ class DBLPSource(Source):
                     )
                 )
             return papers
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
             logger.warning("DBLP search failed for query %r: %s", query, exc)
             return []
 
