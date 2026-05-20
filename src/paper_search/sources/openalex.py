@@ -34,15 +34,26 @@ class OpenAlexSource(Source):
 
 
 def _run_sync_search(query: str, max_results: int) -> list[Paper]:
-    works = Works().search(query).get(per_page=min(max_results, 200))
-    papers: list[Paper] = []
+    search_query = _build_search_query(query)
+    works = Works().search(search_query).get(per_page=min(max_results, 200))
 
+    if not works and '"' in search_query:
+        fallback = " AND ".join(search_query.strip('"').split())
+        works = Works().search(fallback).get(per_page=min(max_results, 200))
+
+    papers: list[Paper] = []
     for work in works:
         paper = _work_to_paper(work)
         if paper is not None:
             papers.append(paper)
 
     return papers
+
+
+def _build_search_query(query: str) -> str:
+    if '"' in query or len(query.split()) <= 1:
+        return query
+    return f'"{query}"'
 
 
 def _work_to_paper(work: dict[str, Any]) -> Paper | None:
