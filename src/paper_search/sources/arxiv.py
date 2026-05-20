@@ -5,6 +5,8 @@ import logging
 
 import arxiv
 
+arxiv._USER_AGENT = "paper-search/0.1"
+
 from ..models import Author, Paper
 from .base import Source
 
