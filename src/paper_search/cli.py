@@ -11,7 +11,7 @@ from .dedup import deduplicate
 from .models import Paper
 from .sources import ArxivSource, DBLPSource, OpenAlexSource, Source
 
-app = typer.Typer(name="paper-search")
+app = typer.Typer()
 console = Console()
 
 _SOURCE_MAP: dict[str, type[Source]] = {
@@ -23,7 +23,10 @@ _SOURCE_MAP: dict[str, type[Source]] = {
 
 @app.command()
 def search(
-    query: Annotated[str, typer.Argument(help="Search query string")],
+    query: Annotated[
+        str,
+        typer.Option("--query", "-q", help="Search query string"),
+    ],
     sources: Annotated[
         str,
         typer.Option(
@@ -120,3 +123,7 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+if __name__ == "__main__":
+    app()
