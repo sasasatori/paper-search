@@ -22,20 +22,25 @@ logger = logging.getLogger(__name__)
 class OpenAlexSource(Source):
     name = "openalex"
 
-    async def search(self, query: str, max_results: int = 50) -> list[Paper]:
+    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None) -> list[Paper]:
         if max_results <= 0:
             return []
 
         try:
-            return await asyncio.to_thread(_run_sync_search, query, max_results)
+            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year)
         except Exception as exc:
             logger.warning("OpenAlex search failed for query %r: %s", query, exc)
             return []
 
 
-def _run_sync_search(query: str, max_results: int) -> list[Paper]:
+def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None) -> list[Paper]:
     search_query = _build_search_query(query)
-    works = Works().search(search_query).get(per_page=min(max_results, 200))
+    w = Works().search(search_query)
+    if author:
+        search_query = f"{search_query} {author}"
+    if year is not None:
+        w = w.filter(publication_year=year)
+    works = w.get(per_page=min(max_results, 200))
 
     if not works and '"' in search_query:
         fallback = " AND ".join(search_query.strip('"').split())

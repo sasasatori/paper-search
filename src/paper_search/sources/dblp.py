@@ -20,9 +20,12 @@ class DBLPSource(Source):
         self,
         query: str,
         max_results: int = 50,
+        author: str | None = None,
+        year: int | None = None,
     ) -> list[Paper]:
+        q = _build_dblp_query(query, author)
         params = {
-            "q": query,
+            "q": q,
             "format": "json",
             "h": min(max_results, 1000),
             "f": 0,
@@ -45,11 +48,14 @@ class DBLPSource(Source):
             papers: list[Paper] = []
             for hit in hits:
                 info = hit["info"]
+                paper_year = self._parse_year(info)
+                if year is not None and paper_year != year:
+                    continue
                 papers.append(
                     Paper(
                         title=info["title"],
                         authors=self._parse_authors(info),
-                        year=self._parse_year(info),
+                        year=paper_year,
                         publication_date=None,
                         doi=info.get("doi"),
                         abstract=None,
@@ -84,3 +90,10 @@ class DBLPSource(Source):
         if year is None:
             return None
         return int(year)
+
+
+def _build_dblp_query(query: str, author: str | None) -> str:
+    if author:
+        author_part = author.replace(" ", "_")
+        return f"author:{author_part}: {query}"
+    return query

@@ -13,5 +13,7 @@ class Source(ABC):
         self,
         query: str,
         max_results: int = 50,
+        author: str | None = None,
+        year: int | None = None,
     ) -> list[Paper]:
         ...
