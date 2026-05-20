@@ -51,6 +51,10 @@ def search(
         int | None,
         typer.Option("--year", "-y", help="Filter by publication year"),
     ] = None,
+    category: Annotated[
+        str | None,
+        typer.Option("--category", "-c", help="Filter by domain/category (e.g. cs.AI, VLSI, computer vision)"),
+    ] = None,
 ):
     source_names = [s.strip() for s in sources.split(",") if s.strip()]
     resolved = _resolve_sources(source_names)
@@ -63,12 +67,14 @@ def search(
         filters.append(f"author={author}")
     if year:
         filters.append(f"year={year}")
+    if category:
+        filters.append(f"category={category}")
     filter_str = f" ({', '.join(filters)})" if filters else ""
 
     console.print(f"[bold]Searching for:[/bold] {query}{filter_str}")
     console.print(f"[bold]Sources:[/bold] {', '.join(source_names)}")
 
-    papers = asyncio.run(_run_searches(resolved, query, max_results, author, year))
+    papers = asyncio.run(_run_searches(resolved, query, max_results, author, year, category))
     console.print(f"[dim]Collected {len(papers)} results.[/dim]")
 
     if dedup and len(papers) > 1:
@@ -90,8 +96,8 @@ def _resolve_sources(names: list[str]) -> list[Source]:
     return instances
 
 
-async def _run_searches(sources: list[Source], query: str, max_results: int, author: str | None, year: int | None) -> list[Paper]:
-    tasks = [source.search(query, max_results, author=author, year=year) for source in sources]
+async def _run_searches(sources: list[Source], query: str, max_results: int, author: str | None, year: int | None, category: str | None) -> list[Paper]:
+    tasks = [source.search(query, max_results, author=author, year=year, category=category) for source in sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     papers: list[Paper] = []

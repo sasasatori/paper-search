@@ -19,12 +19,14 @@ _ARXIV_NS = "http://arxiv.org/schemas/atom"
 _USER_AGENT = "Mozilla/5.0 (compatible; paper-search/0.1; +mailto:user@example.com)"
 
 
-def _build_query(query: str, author: str | None) -> str:
+def _build_query(query: str, author: str | None, category: str | None = None) -> str:
     parts: list[str] = []
     if author:
         parts.append(f'au:"{author}"')
     if query:
         parts.append(f"all:{query}")
+    if category:
+        parts.append(f"cat:{category}")
     return " AND ".join(parts) if parts else "all:*"
 
 
@@ -37,8 +39,9 @@ class ArxivSource(Source):
         max_results: int = 50,
         author: str | None = None,
         year: int | None = None,
+        category: str | None = None,
     ) -> list[Paper]:
-        search_query = _build_query(query, author)
+        search_query = _build_query(query, author, category)
         params = {
             "search_query": search_query,
             "start": 0,

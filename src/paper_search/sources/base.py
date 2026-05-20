@@ -15,5 +15,6 @@ class Source(ABC):
         max_results: int = 50,
         author: str | None = None,
         year: int | None = None,
+        category: str | None = None,
     ) -> list[Paper]:
         ...

@@ -13,6 +13,18 @@ from .base import Source
 logger = logging.getLogger(__name__)
 
 
+def _matches_category(paper: Paper, category: str) -> bool:
+    if not category:
+        return True
+    category_lower = category.lower()
+    if paper.venue and category_lower in paper.venue.lower():
+        return True
+    for cat_name in paper.categories:
+        if category_lower in cat_name.lower():
+            return True
+    return False
+
+
 class DBLPSource(Source):
     name = "dblp"
 
@@ -22,6 +34,7 @@ class DBLPSource(Source):
         max_results: int = 50,
         author: str | None = None,
         year: int | None = None,
+        category: str | None = None,
     ) -> list[Paper]:
         q = _build_dblp_query(query, author)
         params = {
@@ -51,8 +64,7 @@ class DBLPSource(Source):
                 paper_year = self._parse_year(info)
                 if year is not None and paper_year != year:
                     continue
-                papers.append(
-                    Paper(
+                paper = Paper(
                         title=info["title"],
                         authors=self._parse_authors(info),
                         year=paper_year,
@@ -66,7 +78,9 @@ class DBLPSource(Source):
                         citation_count=None,
                         categories=[],
                     )
-                )
+                if category and not _matches_category(paper, category):
+                    continue
+                papers.append(paper)
             return papers
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             logger.warning("DBLP search failed for query %r: %s", query, exc)

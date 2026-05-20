@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 import pyalex
+from pyalex import Authors as PyAlexAuthors
 from pyalex import Works
 
 from ..models import Author, Paper
@@ -18,33 +19,97 @@ pyalex.config.api_key = os.getenv("PYALEX_API_KEY")
 
 logger = logging.getLogger(__name__)
 
+_AUTHOR_CANDIDATE_LIMIT = 5
+
 
 class OpenAlexSource(Source):
     name = "openalex"
 
-    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None) -> list[Paper]:
+    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None, category: str | None = None) -> list[Paper]:
         if max_results <= 0:
             return []
 
         try:
-            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year)
+            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year, category)
         except Exception as exc:
             logger.warning("OpenAlex search failed for query %r: %s", query, exc)
             return []
 
 
-def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None) -> list[Paper]:
-    search_query = _build_search_query(query)
-    w = Works().search(search_query)
+def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None, category: str | None) -> list[Paper]:
+    author_ids: list[str] = []
     if author:
-        search_query = f"{search_query} {author}"
+        author_ids = _resolve_author_ids(author)
+        if not author_ids:
+            logger.debug("OpenAlex: no author ID found for %r", author)
+            return []
+
+    per_page = min(max_results, 200)
+    papers: list[Paper] = []
+
+    if author_ids:
+        papers = _search_by_author_ids(query, max_results, year, author_ids)
+    else:
+        papers = _search_by_text(query, max_results, year)
+
+    if category:
+        papers = _filter_by_category(papers, category)
+
+    return papers
+
+
+def _search_by_author_ids(query: str, max_results: int, year: int | None, author_ids: list[str]) -> list[Paper]:
+    seen_ids: set[str] = set()
+    papers: list[Paper] = []
+
+    ids_to_search = author_ids[:_AUTHOR_CANDIDATE_LIMIT]
+    per_author = max(max_results // len(ids_to_search), 3)
+
+    for author_id in ids_to_search:
+        try:
+            w = Works().filter(authorships={"author": {"id": author_id}})
+            if year is not None:
+                w = w.filter(publication_year=year)
+
+            if query and query.strip():
+                search_query = _build_search_query(query)
+                w = w.search(search_query)
+
+            works = w.sort(cited_by_count="desc").get(per_page=min(per_author, 200))
+        except Exception as exc:
+            logger.debug("OpenAlex author filter failed for id %r: %s", author_id, exc)
+            continue
+
+        for work in works:
+            source_id = _optional_str(work.get("id"))
+            if not source_id or source_id in seen_ids:
+                continue
+            paper = _work_to_paper(work)
+            if paper is not None:
+                seen_ids.add(source_id)
+                papers.append(paper)
+
+    return papers[:max_results]
+
+
+def _search_by_text(query: str, max_results: int, year: int | None) -> list[Paper]:
+    search_query = _build_search_query(query) if query else ""
+    if not search_query:
+        return []
+
+    w = Works().search(search_query)
     if year is not None:
         w = w.filter(publication_year=year)
-    works = w.get(per_page=min(max_results, 200))
+
+    per_page = min(max_results, 200)
+    works = w.get(per_page=per_page)
 
     if not works and '"' in search_query:
         fallback = " AND ".join(search_query.strip('"').split())
-        works = Works().search(fallback).get(per_page=min(max_results, 200))
+        w = Works().search(fallback)
+        if year is not None:
+            w = w.filter(publication_year=year)
+        works = w.get(per_page=per_page)
 
     papers: list[Paper] = []
     for work in works:
@@ -53,6 +118,32 @@ def _run_sync_search(query: str, max_results: int, author: str | None, year: int
             papers.append(paper)
 
     return papers
+
+
+def _resolve_author_ids(name: str) -> list[str]:
+    try:
+        results = PyAlexAuthors().search(name).get(per_page=25)
+    except Exception as exc:
+        logger.warning("OpenAlex author search failed for %r: %s", name, exc)
+        return []
+
+    candidates: list[tuple[str, int]] = []
+    name_lower = name.lower()
+    for author in results:
+        display_name = _optional_str(author.get("display_name"))
+        if not display_name:
+            continue
+        if name_lower not in display_name.lower():
+            continue
+
+        author_id = _optional_str(author.get("id"))
+        if not author_id:
+            continue
+        works_count = _optional_int(author.get("works_count")) or 0
+        candidates.append((author_id, works_count))
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return [cid for cid, _ in candidates]
 
 
 def _build_search_query(query: str) -> str:
@@ -151,11 +242,21 @@ def _parse_date(value: object) -> date | None:
     if date_string is None:
         return None
 
-
     try:
         return date.fromisoformat(date_string)
     except ValueError:
         return None
+
+
+def _filter_by_category(papers: list[Paper], category: str) -> list[Paper]:
+    category_lower = category.lower()
+    filtered: list[Paper] = []
+    for paper in papers:
+        for cat in paper.categories:
+            if category_lower in cat.lower():
+                filtered.append(paper)
+                break
+    return filtered
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
