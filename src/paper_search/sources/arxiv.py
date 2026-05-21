@@ -22,6 +22,7 @@ _USER_AGENT = "paper-search/0.1 (mailto:user@example.com)"
 _MIN_INTERVAL = 5.0
 _MAX_RETRIES = 3
 _BASE_BACKOFF = 30.0
+_RETRYABLE_STATUSES = frozenset({429, 503})
 
 
 def _build_query(query: str, author: str | None, category: str | None = None) -> str:
@@ -109,24 +110,24 @@ class ArxivSource(Source):
                 return papers
 
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429 and attempt < _MAX_RETRIES:
+                status = exc.response.status_code
+                if status in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
                     retry_after = _parse_retry_after(exc.response)
                     delay = retry_after if retry_after is not None else _BASE_BACKOFF * (2 ** attempt)
                     delay += random.uniform(0, 1.0)
                     logger.warning(
-                        "arXiv rate limited (429). Waiting %.1fs (attempt %d/%d)",
-                        delay, attempt + 1, _MAX_RETRIES,
+                        "arXiv %d. Waiting %.1fs (attempt %d/%d)",
+                        status, delay, attempt + 1, _MAX_RETRIES,
                     )
                     await asyncio.sleep(delay)
                     continue
-                elif exc.response.status_code == 429:
+                elif status in _RETRYABLE_STATUSES:
                     logger.warning(
-                        "arXiv rate limited (429) after %d retries. Giving up.",
-                        _MAX_RETRIES,
+                        "arXiv %d after %d retries. Giving up.", status, _MAX_RETRIES,
                     )
                     return []
                 else:
-                    logger.warning("arXiv HTTP %d for query %r", exc.response.status_code, query)
+                    logger.warning("arXiv HTTP %d for query %r", status, query)
                     return []
 
             except self._RETRYABLE_ERRORS as exc:
