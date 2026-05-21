@@ -19,7 +19,7 @@ _ATOM_NS = "http://www.w3.org/2005/Atom"
 _ARXIV_NS = "http://arxiv.org/schemas/atom"
 
 _USER_AGENT = "paper-search/0.1 (mailto:user@example.com)"
-_MIN_INTERVAL = 5.0
+_MIN_INTERVAL = 10.0
 _MAX_RETRIES = 3
 _BASE_BACKOFF = 30.0
 _RETRYABLE_STATUSES = frozenset({429, 503})
