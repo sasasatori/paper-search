@@ -25,26 +25,25 @@ _AUTHOR_CANDIDATE_LIMIT = 5
 class OpenAlexSource(Source):
     name = "openalex"
 
-    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None, category: str | None = None) -> list[Paper]:
+    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None, category: str | None = None, affiliation: str | None = None) -> list[Paper]:
         if max_results <= 0:
             return []
 
         try:
-            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year, category)
+            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year, category, affiliation)
         except Exception as exc:
             logger.warning("OpenAlex search failed for query %r: %s", query, exc)
             return []
 
 
-def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None, category: str | None) -> list[Paper]:
+def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None, category: str | None, affiliation: str | None) -> list[Paper]:
     author_ids: list[str] = []
     if author:
-        author_ids = _resolve_author_ids(author)
+        author_ids = _resolve_author_ids(author, affiliation=affiliation)
         if not author_ids:
-            logger.debug("OpenAlex: no author ID found for %r", author)
+            logger.debug("OpenAlex: no author ID found for %r (affiliation=%r)", author, affiliation)
             return []
 
-    per_page = min(max_results, 200)
     papers: list[Paper] = []
 
     if author_ids:
@@ -120,7 +119,7 @@ def _search_by_text(query: str, max_results: int, year: int | None) -> list[Pape
     return papers
 
 
-def _resolve_author_ids(name: str) -> list[str]:
+def _resolve_author_ids(name: str, affiliation: str | None = None) -> list[str]:
     try:
         results = PyAlexAuthors().search(name).get(per_page=25)
     except Exception as exc:
@@ -129,12 +128,25 @@ def _resolve_author_ids(name: str) -> list[str]:
 
     candidates: list[tuple[str, int]] = []
     name_lower = name.lower()
+    affiliation_lower = affiliation.lower() if affiliation else None
+
     for author in results:
         display_name = _optional_str(author.get("display_name"))
         if not display_name:
             continue
         if name_lower not in display_name.lower():
             continue
+
+        if affiliation_lower:
+            last_insts = author.get("last_known_institutions") or []
+            if not isinstance(last_insts, list):
+                continue
+            matched = any(
+                isinstance(inst, dict) and affiliation_lower in (_optional_str(inst.get("display_name")) or "").lower()
+                for inst in last_insts
+            )
+            if not matched:
+                continue
 
         author_id = _optional_str(author.get("id"))
         if not author_id:

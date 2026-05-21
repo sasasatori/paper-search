@@ -40,6 +40,7 @@ class ArxivSource(Source):
         author: str | None = None,
         year: int | None = None,
         category: str | None = None,
+        affiliation: str | None = None,
     ) -> list[Paper]:
         search_query = _build_query(query, author, category)
         params = {
@@ -57,6 +58,10 @@ class ArxivSource(Source):
                 response.raise_for_status()
 
                 papers = _parse_atom(response.text)
+                if affiliation:
+                    papers = _filter_by_affiliation(papers, affiliation)
+                if year is not None:
+                    papers = [p for p in papers if p.year == year]
                 logger.debug("arXiv: %d results for %r", len(papers), query)
                 return papers
 
@@ -167,3 +172,14 @@ def _parse_datetime(element: ElementTree.Element, tag: str) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _filter_by_affiliation(papers: list[Paper], affiliation: str) -> list[Paper]:
+    affiliation_lower = affiliation.lower()
+    filtered: list[Paper] = []
+    for paper in papers:
+        for author in paper.authors:
+            if author.affiliation and affiliation_lower in author.affiliation.lower():
+                filtered.append(paper)
+                break
+    return filtered

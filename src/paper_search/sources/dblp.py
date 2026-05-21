@@ -35,6 +35,7 @@ class DBLPSource(Source):
         author: str | None = None,
         year: int | None = None,
         category: str | None = None,
+        affiliation: str | None = None,
     ) -> list[Paper]:
         q = _build_dblp_query(query, author)
         params = {

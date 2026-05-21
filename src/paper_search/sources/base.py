@@ -16,5 +16,6 @@ class Source(ABC):
         author: str | None = None,
         year: int | None = None,
         category: str | None = None,
+        affiliation: str | None = None,
     ) -> list[Paper]:
         ...
