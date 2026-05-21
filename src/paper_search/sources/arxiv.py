@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time as _time
 from datetime import date, datetime
@@ -22,6 +23,14 @@ _USER_AGENT = "paper-search/0.1 (mailto:user@example.com)"
 _MIN_INTERVAL = 5.0
 _MAX_RETRIES = 3
 _BASE_BACKOFF = 30.0
+
+
+def _detect_proxy() -> str | None:
+    for var in ("ALL_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    return None
 
 
 def _build_query(query: str, author: str | None, category: str | None = None) -> str:
@@ -54,10 +63,15 @@ class ArxivSource(Source):
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                headers={"User-Agent": _USER_AGENT},
-                timeout=30.0,
-            )
+            kwargs = {
+                "headers": {"User-Agent": _USER_AGENT},
+                "timeout": 60.0,
+            }
+            proxy = _detect_proxy()
+            if proxy:
+                kwargs["proxy"] = proxy
+                logger.debug("arXiv using proxy: %s", proxy)
+            self._client = httpx.AsyncClient(**kwargs)
         return self._client
 
     _RETRYABLE_ERRORS = (
