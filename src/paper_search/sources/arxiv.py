@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time as _time
 from datetime import date, datetime
 from xml.etree import ElementTree
 
@@ -16,7 +18,10 @@ _ARXIV_API = "https://export.arxiv.org/api/query"
 _ATOM_NS = "http://www.w3.org/2005/Atom"
 _ARXIV_NS = "http://arxiv.org/schemas/atom"
 
-_USER_AGENT = "Mozilla/5.0 (compatible; paper-search/0.1; +mailto:user@example.com)"
+_USER_AGENT = "paper-search/0.1 (mailto:user@example.com)"
+_MIN_INTERVAL = 3.0
+_MAX_RETRIES = 3
+_BASE_BACKOFF = 10.0
 
 
 def _build_query(query: str, author: str | None, category: str | None = None) -> str:
@@ -30,8 +35,30 @@ def _build_query(query: str, author: str | None, category: str | None = None) ->
     return " AND ".join(parts) if parts else "all:*"
 
 
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After", "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 class ArxivSource(Source):
     name = "arxiv"
+
+    _client: httpx.AsyncClient | None = None
+    _rate_lock = asyncio.Lock()
+    _last_request: float = 0.0
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                headers={"User-Agent": _USER_AGENT},
+                timeout=30.0,
+            )
+        return self._client
 
     async def search(
         self,
@@ -49,11 +76,18 @@ class ArxivSource(Source):
             "max_results": min(max_results, 100),
         }
 
-        try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": _USER_AGENT},
-                timeout=30.0,
-            ) as client:
+        client = await self._get_client()
+
+        for attempt in range(_MAX_RETRIES + 1):
+            async with self._rate_lock:
+                now = _time.monotonic()
+                wait = self._last_request + _MIN_INTERVAL - now
+                if wait > 0:
+                    logger.debug("arXiv rate throttle: waiting %.1fs", wait)
+                    await asyncio.sleep(wait)
+                self._last_request = _time.monotonic()
+
+            try:
                 response = await client.get(_ARXIV_API, params=params)
                 response.raise_for_status()
 
@@ -65,15 +99,31 @@ class ArxivSource(Source):
                 logger.debug("arXiv: %d results for %r", len(papers), query)
                 return papers
 
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                logger.warning("arXiv rate limited (429). Wait and retry later.")
-            else:
-                logger.warning("arXiv HTTP %d for query %r", exc.response.status_code, query)
-            return []
-        except Exception:
-            logger.warning("arXiv search failed for query %r", query, exc_info=True)
-            return []
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429 and attempt < _MAX_RETRIES:
+                    retry_after = _parse_retry_after(exc.response)
+                    delay = retry_after if retry_after is not None else _BASE_BACKOFF * (2 ** attempt)
+                    delay += random.uniform(0, 1.0)
+                    logger.warning(
+                        "arXiv rate limited (429). Waiting %.1fs (attempt %d/%d)",
+                        delay, attempt + 1, _MAX_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                elif exc.response.status_code == 429:
+                    logger.warning(
+                        "arXiv rate limited (429) after %d retries. Giving up.",
+                        _MAX_RETRIES,
+                    )
+                    return []
+                else:
+                    logger.warning("arXiv HTTP %d for query %r", exc.response.status_code, query)
+                    return []
+            except Exception:
+                logger.warning("arXiv search failed for query %r", query, exc_info=True)
+                return []
+
+        return []
 
 
 def _parse_atom(xml_text: str) -> list[Paper]:
