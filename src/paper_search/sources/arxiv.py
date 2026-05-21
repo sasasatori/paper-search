@@ -19,9 +19,9 @@ _ATOM_NS = "http://www.w3.org/2005/Atom"
 _ARXIV_NS = "http://arxiv.org/schemas/atom"
 
 _USER_AGENT = "paper-search/0.1 (mailto:user@example.com)"
-_MIN_INTERVAL = 3.0
+_MIN_INTERVAL = 5.0
 _MAX_RETRIES = 3
-_BASE_BACKOFF = 10.0
+_BASE_BACKOFF = 30.0
 
 
 def _build_query(query: str, author: str | None, category: str | None = None) -> str:
@@ -60,6 +60,21 @@ class ArxivSource(Source):
             )
         return self._client
 
+    _RETRYABLE_ERRORS = (
+        httpx.ReadTimeout,
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpx.RemoteProtocolError,
+    )
+
+    async def _await_request(self) -> None:
+        async with self._rate_lock:
+            now = _time.monotonic()
+            wait = self._last_request + _MIN_INTERVAL - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request = _time.monotonic()
+
     async def search(
         self,
         query: str,
@@ -79,13 +94,7 @@ class ArxivSource(Source):
         client = await self._get_client()
 
         for attempt in range(_MAX_RETRIES + 1):
-            async with self._rate_lock:
-                now = _time.monotonic()
-                wait = self._last_request + _MIN_INTERVAL - now
-                if wait > 0:
-                    logger.debug("arXiv rate throttle: waiting %.1fs", wait)
-                    await asyncio.sleep(wait)
-                self._last_request = _time.monotonic()
+            await self._await_request()
 
             try:
                 response = await client.get(_ARXIV_API, params=params)
@@ -119,6 +128,19 @@ class ArxivSource(Source):
                 else:
                     logger.warning("arXiv HTTP %d for query %r", exc.response.status_code, query)
                     return []
+
+            except self._RETRYABLE_ERRORS as exc:
+                if attempt < _MAX_RETRIES:
+                    delay = _BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 1.0)
+                    logger.warning(
+                        "arXiv connection error (%s). Waiting %.1fs (attempt %d/%d)",
+                        type(exc).__name__, delay, attempt + 1, _MAX_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("arXiv connection failed after %d retries.", _MAX_RETRIES)
+                return []
+
             except Exception:
                 logger.warning("arXiv search failed for query %r", query, exc_info=True)
                 return []
