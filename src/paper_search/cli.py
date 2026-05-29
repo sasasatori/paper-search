@@ -8,15 +8,15 @@ from rich.console import Console
 from rich.table import Table
 
 from .dedup import deduplicate
+from .download import Downloader, DownloadResult
 from .models import Paper
-from .sources import ArxivSource, DBLPSource, OpenAlexSource, Source
+from .sources import DBLPSource, OpenAlexSource, Source
 
 app = typer.Typer()
 console = Console()
 
 _SOURCE_MAP: dict[str, type[Source]] = {
     "openalex": OpenAlexSource,
-    "arxiv": ArxivSource,
     "dblp": DBLPSource,
 }
 
@@ -34,7 +34,7 @@ def search(
             "-s",
             help="Comma-separated source list: openalex,arxiv,dblp",
         ),
-    ] = "arxiv",
+    ] = "openalex,dblp",
     max_results: Annotated[
         int,
         typer.Option("--max-results", "-n", help="Max results per source"),
@@ -59,6 +59,14 @@ def search(
         str | None,
         typer.Option("--affiliation", help="Filter by author affiliation/institution keyword"),
     ] = None,
+    download: Annotated[
+        bool,
+        typer.Option("--download", help="Download PDFs for all results with available URLs"),
+    ] = False,
+    download_dir: Annotated[
+        str,
+        typer.Option("--download-dir", help="Directory to save downloaded PDFs"),
+    ] = "./downloads",
 ):
     source_names = [s.strip() for s in sources.split(",") if s.strip()]
     resolved = _resolve_sources(source_names)
@@ -90,6 +98,76 @@ def search(
 
     _print_table(papers)
 
+    if download and papers:
+        console.print(f"\n[bold]Downloading PDFs to {download_dir}...[/bold]")
+        downloader = Downloader(download_dir=download_dir)
+        results = asyncio.run(_run_downloads(downloader, papers))
+        succeeded = sum(1 for r in results.values() if r.status == "success")
+        paywalled = sum(1 for r in results.values() if r.status == "paywall")
+        no_url = sum(1 for r in results.values() if r.status == "no_url")
+        failed = len(results) - succeeded - paywalled - no_url
+
+        parts = [f"[dim]Downloaded {succeeded} PDF(s)[/dim]"]
+        if paywalled:
+            parts.append(f"[yellow]{paywalled} behind paywall[/yellow]")
+        if no_url:
+            parts.append(f"[dim]{no_url} no URL[/dim]")
+        if failed:
+            parts.append(f"[red]{failed} failed[/red]")
+        console.print("  ".join(parts))
+
+        for key, r in results.items():
+            if r.status == "success":
+                console.print(f"  [green]✓[/green] {key[:60]} → {r.path}")
+            elif r.status == "paywall":
+                console.print(f"  [yellow]🔒 {r.detail}[/yellow]  ({key[:50]})")
+            elif r.status == "no_url":
+                console.print(f"  [dim]—[/dim] {key[:60]} (no URL)")
+            else:
+                console.print(f"  [red]✗[/red] {key[:60]} — {r.detail}")
+
+
+@app.command()
+def download(
+    arxiv_id: Annotated[
+        str | None,
+        typer.Option("--arxiv-id", help="Download PDF from arXiv by paper ID (e.g. 2106.12345)"),
+    ] = None,
+    url: Annotated[
+        str | None,
+        typer.Option("--url", "-u", help="Download PDF from a direct URL"),
+    ] = None,
+    download_dir: Annotated[
+        str,
+        typer.Option("--download-dir", "-o", help="Directory to save the PDF"),
+    ] = "./downloads",
+):
+    if not arxiv_id and not url:
+        console.print("[red]Specify --arxiv-id or --url.[/red]")
+        raise typer.Exit(1)
+
+    downloader = Downloader(download_dir=download_dir)
+
+    if arxiv_id:
+        console.print(f"[bold]Downloading arXiv {arxiv_id}...[/bold]")
+        result = asyncio.run(downloader.download_arxiv(arxiv_id))
+
+    if url:
+        console.print(f"[bold]Downloading {url}...[/bold]")
+        result = asyncio.run(downloader.download_url(url))
+
+    if result.status == "success":
+        console.print(f"[green]✓ Saved to {result.path}[/green]")
+    elif result.status == "paywall":
+        console.print(f"[yellow]🔒 {result.detail}[/yellow]")
+        raise typer.Exit(1)
+    elif result.status == "not_found":
+        console.print(f"[red]✗ {result.detail}[/red]")
+        raise typer.Exit(1)
+    else:
+        console.print(f"[red]✗ Download failed — {result.detail}[/red]")
+        raise typer.Exit(1)
+
 
 def _resolve_sources(names: list[str]) -> list[Source]:
     instances: list[Source] = []
@@ -114,6 +192,15 @@ async def _run_searches(sources: list[Source], query: str, max_results: int, aut
             console.print(f"[dim]{source.name}: {len(result)} results[/dim]")
             papers.extend(result)
     return papers
+
+
+async def _run_downloads(downloader: Downloader, papers: list[Paper]) -> dict[str, DownloadResult]:
+    results: dict[str, DownloadResult] = {}
+    for paper in papers:
+        result = await downloader.download_paper(paper)
+        key = paper.doi or paper.title[:60]
+        results[key] = result
+    return results
 
 
 def _print_table(papers: list[Paper]) -> None:
