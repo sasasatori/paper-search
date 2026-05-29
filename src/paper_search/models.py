@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-SourceName = Literal["openalex", "arxiv", "dblp", "ieee", "acm"]
+SourceName = Literal["openalex", "arxiv", "dblp", "ieee", "acm", "unknown"]
 
 
 class Author(BaseModel):
