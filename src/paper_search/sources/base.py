@@ -17,5 +17,6 @@ class Source(ABC):
         year: int | None = None,
         category: str | None = None,
         affiliation: str | None = None,
+        venue: str | None = None,
     ) -> list[Paper]:
         ...

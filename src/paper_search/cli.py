@@ -59,6 +59,10 @@ def search(
         str | None,
         typer.Option("--affiliation", help="Filter by author affiliation/institution keyword"),
     ] = None,
+    venue: Annotated[
+        str | None,
+        typer.Option("--venue", "-v", help="Filter by venue (e.g. HPCA, ISCA, NeurIPS)"),
+    ] = None,
     download: Annotated[
         bool,
         typer.Option("--download", help="Download PDFs for all results with available URLs"),
@@ -83,12 +87,14 @@ def search(
         filters.append(f"category={category}")
     if affiliation:
         filters.append(f"affiliation={affiliation}")
+    if venue:
+        filters.append(f"venue={venue}")
     filter_str = f" ({', '.join(filters)})" if filters else ""
 
     console.print(f"[bold]Searching for:[/bold] {query}{filter_str}")
     console.print(f"[bold]Sources:[/bold] {', '.join(source_names)}")
 
-    papers = asyncio.run(_run_searches(resolved, query, max_results, author, year, category, affiliation))
+    papers = asyncio.run(_run_searches(resolved, query, max_results, author, year, category, affiliation, venue))
     console.print(f"[dim]Collected {len(papers)} results.[/dim]")
 
     if dedup and len(papers) > 1:
@@ -180,8 +186,8 @@ def _resolve_sources(names: list[str]) -> list[Source]:
     return instances
 
 
-async def _run_searches(sources: list[Source], query: str, max_results: int, author: str | None, year: int | None, category: str | None, affiliation: str | None) -> list[Paper]:
-    tasks = [source.search(query, max_results, author=author, year=year, category=category, affiliation=affiliation) for source in sources]
+async def _run_searches(sources: list[Source], query: str, max_results: int, author: str | None, year: int | None, category: str | None, affiliation: str | None, venue: str | None = None) -> list[Paper]:
+    tasks = [source.search(query, max_results, author=author, year=year, category=category, affiliation=affiliation, venue=venue) for source in sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     papers: list[Paper] = []

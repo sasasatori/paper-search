@@ -25,18 +25,18 @@ _AUTHOR_CANDIDATE_LIMIT = 5
 class OpenAlexSource(Source):
     name = "openalex"
 
-    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None, category: str | None = None, affiliation: str | None = None) -> list[Paper]:
+    async def search(self, query: str, max_results: int = 50, author: str | None = None, year: int | None = None, category: str | None = None, affiliation: str | None = None, venue: str | None = None) -> list[Paper]:
         if max_results <= 0:
             return []
 
         try:
-            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year, category, affiliation)
+            return await asyncio.to_thread(_run_sync_search, query, max_results, author, year, category, affiliation, venue)
         except Exception as exc:
             logger.warning("OpenAlex search failed for query %r: %s", query, exc)
             return []
 
 
-def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None, category: str | None, affiliation: str | None) -> list[Paper]:
+def _run_sync_search(query: str, max_results: int, author: str | None, year: int | None, category: str | None, affiliation: str | None, venue: str | None = None) -> list[Paper]:
     author_ids: list[str] = []
     if author:
         author_ids = _resolve_author_ids(author, affiliation=affiliation)
@@ -51,6 +51,9 @@ def _run_sync_search(query: str, max_results: int, author: str | None, year: int
     else:
         papers = _search_by_text(query, max_results, year)
 
+    if venue:
+        papers = [p for p in papers if venue.lower() in (p.venue or "").lower()]
+
     if category:
         papers = _filter_by_category(papers, category)
 
@@ -58,35 +61,35 @@ def _run_sync_search(query: str, max_results: int, author: str | None, year: int
 
 
 def _search_by_author_ids(query: str, max_results: int, year: int | None, author_ids: list[str]) -> list[Paper]:
-    seen_ids: set[str] = set()
+    # OR-combine all candidate IDs into a single query. Splitting max_results
+    # across separate per-author queries buries the right person when
+    # higher-output namesakes share the same name.
+    combined = "|".join(author_ids[:_AUTHOR_CANDIDATE_LIMIT])
+
+    try:
+        w = Works().filter(authorships={"author": {"id": combined}})
+        if year is not None:
+            w = w.filter(publication_year=year)
+
+        if query and query.strip():
+            search_query = _build_search_query(query)
+            w = w.search(search_query)
+
+        works = w.sort(cited_by_count="desc").get(per_page=min(max_results, 200))
+    except Exception as exc:
+        logger.debug("OpenAlex author filter failed for ids %r: %s", combined, exc)
+        return []
+
     papers: list[Paper] = []
-
-    ids_to_search = author_ids[:_AUTHOR_CANDIDATE_LIMIT]
-    per_author = max(max_results // len(ids_to_search), 3)
-
-    for author_id in ids_to_search:
-        try:
-            w = Works().filter(authorships={"author": {"id": author_id}})
-            if year is not None:
-                w = w.filter(publication_year=year)
-
-            if query and query.strip():
-                search_query = _build_search_query(query)
-                w = w.search(search_query)
-
-            works = w.sort(cited_by_count="desc").get(per_page=min(per_author, 200))
-        except Exception as exc:
-            logger.debug("OpenAlex author filter failed for id %r: %s", author_id, exc)
+    seen_ids: set[str] = set()
+    for work in works:
+        source_id = _optional_str(work.get("id"))
+        if not source_id or source_id in seen_ids:
             continue
-
-        for work in works:
-            source_id = _optional_str(work.get("id"))
-            if not source_id or source_id in seen_ids:
-                continue
-            paper = _work_to_paper(work)
-            if paper is not None:
-                seen_ids.add(source_id)
-                papers.append(paper)
+        paper = _work_to_paper(work)
+        if paper is not None:
+            seen_ids.add(source_id)
+            papers.append(paper)
 
     return papers[:max_results]
 

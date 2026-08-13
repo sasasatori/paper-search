@@ -84,6 +84,7 @@ class ArxivSource(Source):
         year: int | None = None,
         category: str | None = None,
         affiliation: str | None = None,
+        venue: str | None = None,
     ) -> list[Paper]:
         search_query = _build_query(query, author, category)
         params = {
@@ -104,6 +105,8 @@ class ArxivSource(Source):
                 papers = _parse_atom(response.text)
                 if affiliation:
                     papers = _filter_by_affiliation(papers, affiliation)
+                if venue:
+                    papers = [p for p in papers if venue.lower() in (p.venue or "").lower()]
                 if year is not None:
                     papers = [p for p in papers if p.year == year]
                 logger.debug("arXiv: %d results for %r", len(papers), query)

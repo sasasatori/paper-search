@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import date
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -25,6 +26,7 @@ from .download import DownloadResult
 from .download import Downloader as _Downloader
 from .models import Paper
 from .sources import DBLPSource, OpenAlexSource
+from .sources.dblp import _base_name
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,23 @@ mcp = FastMCP("paper-search", json_response=True)
 # ---------------------------------------------------------------------------
 
 
-def _paper_to_dict(paper: Paper) -> dict:
+def _paper_to_dict(paper: Paper, compact: bool = False) -> dict:
+    if compact:
+        names = [a.name for a in paper.authors]
+        shown = names[:3]
+        author_str = ", ".join(shown)
+        if len(names) > 3:
+            author_str += f" et al. (+{len(names) - 3})"
+        return {
+            "title": paper.title,
+            "authors": author_str,
+            "venue": paper.venue,
+            "year": paper.year,
+            "doi": paper.doi,
+            "source": paper.source,
+            "citation_count": paper.citation_count,
+            "pdf_url": paper.pdf_url,
+        }
     return {
         "title": paper.title,
         "authors": [
@@ -43,6 +61,7 @@ def _paper_to_dict(paper: Paper) -> dict:
                 "name": a.name,
                 "affiliation": a.affiliation,
                 "orcid": a.orcid,
+                "dblp_pid": a.dblp_pid,
             }
             for a in paper.authors
         ],
@@ -75,13 +94,15 @@ def _download_result_to_dict(r: DownloadResult) -> dict:
 
 @mcp.tool()
 async def search_papers(
-    query: str,
+    query: str = "",
     max_results: int = 10,
     year: int | None = None,
     author: str | None = None,
     category: str | None = None,
     affiliation: str | None = None,
+    venue: str | None = None,
     dedup: bool = True,
+    compact: bool = True,
 ) -> str:
     """Search academic papers across OpenAlex and DBLP with parallel queries.
 
@@ -89,24 +110,40 @@ async def search_papers(
     Results are merged and optionally deduplicated using DOI exact match
     followed by Jaccard title similarity (threshold 0.7).
 
+    When `author` is given and `query` is empty or just repeats the author
+    name, DBLP switches to author-centric mode: it resolves the author's
+    person PID(s) and returns their full publication list (filtered by
+    year/venue). This is far more reliable than keyword search for
+    "all papers by person X" queries.
+
+    Note: very recent conferences (past ~3-6 months) may not be indexed yet
+    on DBLP/OpenAlex. If results look incomplete for a recent venue+year,
+    cross-check the conference's official program page.
+
     Args:
-        query: Search keywords (supports phrase search, e.g. "graph neural network")
+        query: Search keywords (supports phrase search, e.g. "graph neural network").
+               Optional when `author` is provided.
         max_results: Maximum results per source (1-100, default 10)
         year: Optional publication year filter
         author: Optional author name filter
         category: Optional domain/category filter (e.g. "cs.AI", "VLSI")
         affiliation: Optional institution keyword filter (OpenAlex only)
+        venue: Optional venue filter (e.g. "HPCA", "ISCA", "NeurIPS"). DBLP:
+               native venue syntax; OpenAlex: matched against source name.
         dedup: Enable cross-source deduplication (default true)
+        compact: Return slim paper records (default true). Set false for full
+                 author lists with affiliations/ORCIDs/abstracts.
     """
     sources = [OpenAlexSource(), DBLPSource()]
     tasks = [
-        s.search(query, max_results, author=author, year=year, category=category, affiliation=affiliation)
+        s.search(query, max_results, author=author, year=year, category=category, affiliation=affiliation, venue=venue)
         for s in sources
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     papers: list[Paper] = []
     errors: list[str] = []
+    warnings: list[str] = []
     stats: dict[str, int] = {}
 
     for source, result in zip(sources, results):
@@ -115,17 +152,137 @@ async def search_papers(
         elif isinstance(result, list):
             stats[source.name] = len(result)
             papers.extend(result)
+            last_error = getattr(source, "last_error", None)
+            if last_error:
+                errors.append(f"{source.name}: {last_error}")
+            merged = getattr(source, "last_candidates", [])
+            if len(merged) > 1:
+                names = ", ".join(f"{c['name']} ({c['pid']})" for c in merged)
+                warnings.append(
+                    f"dblp: merged papers from {len(merged)} same-name profiles: "
+                    f"{names}. Results may include namesakes — use "
+                    "get_author_papers with dblp_pid to restrict to one identity."
+                )
 
     before_dedup = len(papers)
     if dedup and len(papers) > 1:
         papers = _dedup(papers)
+
+    if not papers:
+        if year is not None and year >= date.today().year - 1:
+            warnings.append(
+                f"Zero results for year={year}. Very recent publications "
+                "(past ~3-6 months) may not be indexed on DBLP/OpenAlex yet — "
+                "check the venue's official program page."
+            )
+        if author:
+            warnings.append(
+                f"Zero results for author {author!r}. Name disambiguation may be "
+                "hiding results — try get_author_papers to inspect candidate "
+                "identities (DBLP PIDs + affiliations)."
+            )
 
     output = {
         "total": len(papers),
         "dedup_removed": before_dedup - len(papers) if dedup else 0,
         "per_source": stats,
         "errors": errors,
-        "papers": [_paper_to_dict(p) for p in papers],
+        "warnings": warnings,
+        "papers": [_paper_to_dict(p, compact=compact) for p in papers],
+    }
+    return json.dumps(output, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_author_papers(
+    name: str,
+    dblp_pid: str | None = None,
+    year: int | None = None,
+    venue: str | None = None,
+    max_results: int = 100,
+    compact: bool = True,
+) -> str:
+    """List publications for a specific author via DBLP person profiles.
+
+    Resolves the name to DBLP person PID(s) — the canonical CS author
+    disambiguation system — and returns the full publication list for each
+    candidate, along with their affiliations so you can tell namesakes apart.
+
+    Use this for "all papers by person X (at venue V in year Y)" queries,
+    especially for common names where keyword search returns namesakes.
+
+    Note: DBLP is CS-only and lags very recent conferences by weeks/months.
+
+    Args:
+        name: Author name, e.g. "Zhenhua Zhu"
+        dblp_pid: Skip resolution and use this PID directly (e.g. "07/4259-2")
+        year: Optional publication year filter
+        venue: Optional venue filter, e.g. "HPCA", "ISCA" (substring match)
+        max_results: Max papers per candidate (default 100)
+        compact: Return slim paper records (default true)
+    """
+    source = DBLPSource()
+
+    if dblp_pid:
+        candidates = [{"name": name, "pid": dblp_pid, "affiliations": []}]
+    else:
+        candidates = await source.resolve_authors(name)
+        if not candidates:
+            return json.dumps(
+                {
+                    "total": 0,
+                    "candidates": [],
+                    "papers": [],
+                    "warnings": [f"No DBLP author profile found for {name!r}."],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        base = _base_name(name)
+        exact = [c for c in candidates if _base_name(c["name"]) == base]
+        candidates = exact or candidates
+
+    all_papers: list[Paper] = []
+    per_candidate: list[dict] = []
+    seen: set[str] = set()
+
+    for i, cand in enumerate(candidates[:4]):
+        if i > 0:
+            await asyncio.sleep(1.0)
+        papers = await source.author_papers(
+            cand["pid"], year=year, venue=venue, max_results=max_results
+        )
+        per_candidate.append(
+            {
+                "name": cand["name"],
+                "pid": cand["pid"],
+                "affiliations": cand["affiliations"],
+                "paper_count": len(papers),
+            }
+        )
+        for p in papers:
+            if p.source_id not in seen:
+                seen.add(p.source_id)
+                all_papers.append(p)
+
+    all_papers.sort(key=lambda p: (p.year or 0), reverse=True)
+
+    warnings: list[str] = []
+    if source.last_error:
+        warnings.append(f"dblp: {source.last_error}")
+    if len(per_candidate) > 1:
+        warnings.append(
+            "Multiple DBLP profiles match this name (homonyms). Papers from all "
+            "matches are merged below — use the candidates list with dblp_pid "
+            "to restrict to one identity."
+        )
+
+    output = {
+        "total": len(all_papers),
+        "candidates": per_candidate,
+        "warnings": warnings,
+        "papers": [_paper_to_dict(p, compact=compact) for p in all_papers],
     }
     return json.dumps(output, ensure_ascii=False, indent=2)
 

@@ -13,6 +13,7 @@ class Author(BaseModel):
     name: str
     orcid: str | None = None
     affiliation: str | None = None
+    dblp_pid: str | None = None
 
 
 class Paper(BaseModel):
